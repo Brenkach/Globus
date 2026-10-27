@@ -1,0 +1,40 @@
+name: globus
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: globus
+      POSTGRES_PASSWORD: globus
+      POSTGRES_DB: globus
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+    - "5434:5432" # для підключення з DBeaver/pgAdmin; 5433, щоб не конфліктувати з локальним Postgres
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U globus -d globus"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://globus:globus@db:5432/globus
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+networks:
+  backend:
