@@ -3,6 +3,7 @@ name: globus
 services:
   db:
     image: postgis/postgis:16-3.4
+    platform: linux/amd64
     environment:
       POSTGRES_USER: globus
       POSTGRES_PASSWORD: globus
@@ -10,7 +11,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-    - "5434:5432" # для підключення з DBeaver/pgAdmin; 5433, щоб не конфліктувати з локальним Postgres
+      - "5434:5432"
     networks:
       - backend
     healthcheck:
@@ -33,8 +34,27 @@ services:
       - backend
     restart: unless-stopped
 
+  pgadmin:
+    image: dpage/pgadmin4:8.12
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@globus.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    ports:
+      - "5050:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+
 volumes:
   pgdata:
+  pgadmin_data:
 
 networks:
   backend:

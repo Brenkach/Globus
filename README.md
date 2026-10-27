@@ -21,6 +21,7 @@ docker compose up --build
 - API: http://localhost:8000
 - Swagger UI: http://localhost:8000/docs
 - OpenAPI-специфікація: http://localhost:8000/openapi.json
+- pgAdmin: http://localhost:5050 (сервер Globus уже налаштований, пароль `globus`)
 
 Демо-дані (3 ресторани з меню, 5 кур'єрів, 2 клієнти):
 
@@ -51,25 +52,27 @@ curl localhost:8000/orders/1       # дані на місці, бо лежать
 
 ```mermaid
 flowchart LR
-    client["Клієнтський застосунок<br/>(клієнт / ресторан)"]
+    client["Клієнт / Ресторан"]
     courierApp["Застосунок кур'єра"]
 
-    subgraph docker["Docker Compose · проєкт globus · мережа backend"]
-        subgraph api["Globus API · FastAPI / Uvicorn :8000"]
-            customers["Модуль customers"]
-            restaurants["Модуль restaurants"]
-            orders["Модуль orders<br/>(статусна машина)"]
-            couriers["Модуль couriers<br/>(геолокація, призначення)"]
-            orders -->|"get_items_for_order"| restaurants
-            orders -->|"reserve_nearest / release"| couriers
-            orders -->|"get_customer"| customers
+    subgraph docker["Docker Compose"]
+        subgraph api["Globus API · FastAPI"]
+            orders["orders"]
+            restaurants["restaurants"]
+            couriers["couriers"]
+            customers["customers"]
+            orders --> restaurants
+            orders --> couriers
+            orders --> customers
         end
-        db[("PostgreSQL 16 + PostGIS :5432<br/>volume: pgdata")]
+        db[("PostgreSQL + PostGIS")]
+        pgadmin["pgAdmin"]
     end
 
-    client -->|"HTTPS / REST JSON"| api
-    courierApp -->|"PUT location кожні 3–5 с<br/>REST JSON"| api
-    api -->|"asyncpg, пул з'єднань<br/>(TCP 5432)"| db
+    client -- "REST / JSON" --> api
+    courierApp -- "PUT location" --> api
+    api -- "asyncpg" --> db
+    pgadmin --> db
 ```
 
 ### Модель даних
@@ -83,12 +86,52 @@ erDiagram
     ORDER ||--|{ ORDER_ITEM : contains
     MENU_ITEM ||--o{ ORDER_ITEM : "snapshot of"
 
-    CUSTOMER { int id PK string name; string phone UK }
-    RESTAURANT { int id PK; string name; string address; float lat; float lng; bool is_active }
-    MENU_ITEM { int id PK; int restaurant_id FK; string name; decimal price; bool is_available }
-    COURIER { int id PK; string name; string phone UK; enum status; float lat; float lng; timestamp location_updated_at }
-    ORDER { int id PK; int customer_id FK; int restaurant_id FK; int courier_id FK; enum status; decimal total_amount }
-    ORDER_ITEM { int id PK; int order_id FK; int menu_item_id FK; string name; decimal unit_price; int quantity }
+    CUSTOMER {
+        int id PK
+        string name
+        string phone UK
+    }
+    RESTAURANT {
+        int id PK
+        string name
+        string address
+        float lat
+        float lng
+        bool is_active
+    }
+    MENU_ITEM {
+        int id PK
+        int restaurant_id FK
+        string name
+        decimal price
+        bool is_available
+    }
+    COURIER {
+        int id PK
+        string name
+        string phone UK
+        enum status
+        float lat
+        float lng
+        timestamp location_updated_at
+    }
+    ORDER {
+        int id PK
+        int customer_id FK
+        int restaurant_id FK
+        int courier_id FK
+        enum status
+        string delivery_address
+        decimal total_amount
+    }
+    ORDER_ITEM {
+        int id PK
+        int order_id FK
+        int menu_item_id FK
+        string name
+        decimal unit_price
+        int quantity
+    }
 ```
 
 Рішення щодо даних:
@@ -227,15 +270,15 @@ docker-compose.yml
 
 ## Розподіл відповідальності
 
-| Компонент | Заньковський В.В. | Бренькач Д.В. |
-|---|-------------------|---------------|
-| Модулі `restaurants`, `customers` | **R**             | C             |
-| Модуль `orders`, статусна машина | **R**             | C             |
-| Обробка помилок, валідація, OpenAPI | **R**             | C             |
-| Модуль `couriers`, геопошук, призначення кур'єра | C                 | **R**         |
-| Схема БД, міграції, індекси | C                 | **R**         |
-| Docker / docker-compose, відтворюваність | C                 | **R**         |
-| Архітектурна схема, аналіз вузьких місць | **R**             | **R**         |
-| Code review | **R**             | **R**         |
+| Компонент | Учасник 1 (ПІБ) | Учасник 2 (ПІБ) |
+|---|---|---|
+| Модулі `restaurants`, `customers` | **R** | C |
+| Модуль `orders`, статусна машина | **R** | C |
+| Обробка помилок, валідація, OpenAPI | **R** | C |
+| Модуль `couriers`, геопошук, призначення кур'єра | C | **R** |
+| Схема БД, міграції, індекси | C | **R** |
+| Docker / docker-compose, відтворюваність | C | **R** |
+| Архітектурна схема, аналіз вузьких місць | **R** | **R** |
+| Code review | **R** | **R** |
 
 **R** — відповідальний виконавець, **C** — консультує та переглядає код.
