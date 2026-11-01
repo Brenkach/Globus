@@ -35,7 +35,7 @@ docker compose exec app python -m app.seed
 
 ```bash
 docker compose restart db          # перезапуск контейнера БД
-curl localhost:8000/orders/1       # дані на місці
+curl localhost:8000/orders/1       # перевірка дані на місці
 docker compose down && docker compose up -d   # навіть повне перестворення контейнерів
 curl localhost:8000/orders/1       # дані на місці, бо лежать у volume pgdata
 ```
