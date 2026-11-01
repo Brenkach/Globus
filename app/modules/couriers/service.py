@@ -44,10 +44,23 @@ async def update_location(
 async def set_status(
     session: AsyncSession, courier_id: int, new_status: CourierStatus
 ) -> Courier:
-    courier = await get_courier(session, courier_id)
-    if courier.status == CourierStatus.BUSY:
+    """Атомарна зміна статусу: умова BUSY перевіряється всередині самого UPDATE.
+
+    Раніше було SELECT + перевірка в Python + UPDATE. При кількох instances між SELECT і UPDATE
+    інший вузол міг призначити кур'єра на замовлення (BUSY), і ми б перезаписали статус на AVAILABLE
+    (кур'єр отримав би друге замовлення). Тепер перевірка і запис виконуються одним оператором.
+    """
+    stmt = (
+        update(Courier)
+        .where(Courier.id == courier_id, Courier.status != CourierStatus.BUSY)
+        .values(status=new_status)
+        .returning(Courier)
+    )
+    courier = (await session.execute(stmt)).scalar_one_or_none()
+    if courier is None:
+        # Нічого не оновлено: або кур'єра нема, або він BUSY.
+        await get_courier(session, courier_id)  # кине 404, якщо кур'єра нема
         raise ConflictError("Courier is delivering an order; status is managed by the system")
-    courier.status = new_status
     await session.commit()
     return courier
 
