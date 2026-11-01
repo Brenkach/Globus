@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from sqlalchemy import text
 
 import app.models  # noqa: F401  (реєстрація моделей)
@@ -16,6 +16,15 @@ app = FastAPI(
     description="Globus — високонавантажений сервіс доставки їжі з відстеженням кур'єрів у реальному часі.",
 )
 register_exception_handlers(app)
+
+
+@app.middleware("http")
+async def add_instance_id(request: Request, call_next):
+    """Позначає, який саме вузол обробив запит. Стану між запитами не зберігає."""
+    response = await call_next(request)
+    response.headers["X-Instance-ID"] = settings.instance_id
+    return response
+
 
 for r in (customers_router, restaurants_router, menu_router, couriers_router, orders_router):
     app.include_router(r)
