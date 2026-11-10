@@ -17,5 +17,9 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
     courier_search_radius_m: float = 5000.0
 
+    # ЛР3: штучна затримка відповіді (мс) для симуляції деградованого вузла.
+    # Задається лише на одному екземплярі під час експерименту; за замовчуванням 0 (вимкнено).
+    artificial_delay_ms: int = 0
+
 
 settings = Settings()

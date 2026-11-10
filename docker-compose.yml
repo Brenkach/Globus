@@ -1,5 +1,29 @@
 name: globus
 
+# Шаблон backend-екземпляра: один образ, одна кодова база, ізольований життєвий цикл.
+# Портів назовні НЕМАЄ: екземпляри доступні лише через балансувальник (інкапсуляція, ЛР3).
+x-app: &app
+  build: .
+  command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  expose:
+    - "8000"
+  # Обмеження CPU робить кожен екземпляр «невеликим сервером»,
+  # щоб ефект горизонтального масштабування було видно в експерименті 1/2/3.
+  cpus: ${APP_CPUS:-0.5}
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  networks:
+    - backend
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+    interval: 5s
+    timeout: 4s
+    retries: 10
+  restart: unless-stopped
+
+x-db-url: &db-url postgresql+asyncpg://globus:globus@db:5432/globus
+
 services:
   db:
     image: postgis/postgis:16-3.4
@@ -10,8 +34,6 @@ services:
       POSTGRES_DB: globus
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5434:5432"
     networks:
       - backend
     healthcheck:
@@ -21,13 +43,12 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Одноразовий сервіс міграцій. Раніше міграції запускались у кожному контейнері app при старті,
-  # а при двох instances вони б виконувались паралельно (гонка за alembic_version).
+  # Одноразовий сервіс міграцій (з ЛР2).
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://globus:globus@db:5432/globus
+      DATABASE_URL: *db-url
     depends_on:
       db:
         condition: service_healthy
@@ -35,46 +56,42 @@ services:
       - backend
     restart: "no"
 
-  # Два однакових instances одного образу. Відрізняються лише INSTANCE_ID.
-  app1: &app
-    build: .
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  # Пул із трьох реплік. Відрізняються лише INSTANCE_ID і (для експерименту) затримкою.
+  app1:
+    <<: *app
     environment:
-      DATABASE_URL: postgresql+asyncpg://globus:globus@db:5432/globus
+      DATABASE_URL: *db-url
       INSTANCE_ID: app-1
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    ports:
-      - "8001:8000"   # прямий доступ до instance 1 (для перевірки cross-instance сценаріїв)
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
+      ARTIFICIAL_DELAY_MS: ${APP1_DELAY_MS:-0}
 
   app2:
     <<: *app
     environment:
-      DATABASE_URL: postgresql+asyncpg://globus:globus@db:5432/globus
+      DATABASE_URL: *db-url
       INSTANCE_ID: app-2
-    ports:
-      - "8002:8000"   # прямий доступ до instance 2
+      ARTIFICIAL_DELAY_MS: ${APP2_DELAY_MS:-0}
 
-  # Єдина точка входу: http://localhost:8000 (як і в лабораторній 1).
+  app3:
+    <<: *app
+    environment:
+      DATABASE_URL: *db-url
+      INSTANCE_ID: app-3
+      ARTIFICIAL_DELAY_MS: ${APP3_DELAY_MS:-0}
+
+  # Єдина точка входу: http://localhost:8000. Статистика балансувальника: http://localhost:8404
   lb:
-    image: nginx:1.27-alpine
+    image: haproxy:2.8-alpine
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./haproxy:/usr/local/etc/haproxy:ro
     ports:
-      - "8000:80"
+      - "8000:8080"
+      - "8404:8404"
     depends_on:
       app1:
         condition: service_healthy
       app2:
+        condition: service_healthy
+      app3:
         condition: service_healthy
     networks:
       - backend
