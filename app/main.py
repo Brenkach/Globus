@@ -1,10 +1,12 @@
 import asyncio
+import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 import app.models  # noqa: F401  (реєстрація моделей)
+from app.core import cache
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.exceptions import register_exception_handlers
@@ -13,9 +15,13 @@ from app.modules.customers.router import router as customers_router
 from app.modules.orders.router import router as orders_router
 from app.modules.restaurants.router import menu_router, router as restaurants_router
 
+# Логи кешу (HIT / MISS / INVALIDATE) з ідентифікатором екземпляра: docker compose logs -f app1 app2 app3
+logging.basicConfig(level=logging.WARNING, format=f"%(asctime)s [{settings.instance_id}] %(name)s %(message)s")
+logging.getLogger("globus").setLevel(logging.INFO)
+
 app = FastAPI(
     title=settings.app_name,
-    version="0.3.0",
+    version="0.4.0",
     description="Globus — високонавантажений сервіс доставки їжі з відстеженням кур'єрів у реальному часі.",
 )
 register_exception_handlers(app)
@@ -50,7 +56,12 @@ async def health():
     200: вузол готовий обробляти запити (БД відповідає).
     503: вузол живий, але деградований (немає зв'язку з БД), тож балансувальник
     має тимчасово виключити його з пулу.
+
+    ЛР4: стан кешу показується, але НЕ впливає на код відповіді. Кеш не обов'язковий:
+    без Redis вузол працює напряму з БД. Якби /health падав без Redis, то відмова кешу
+    виключила б з пулу ВСІ вузли одночасно і поклала б увесь сервіс.
     """
+    cache_state = "ok" if await cache.ping() else "unavailable"
     try:
         async with SessionLocal() as session:
             await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=HEALTH_DB_TIMEOUT_S)
@@ -58,6 +69,12 @@ async def health():
         return JSONResponse(
             status_code=503,
             content={"status": "degraded", "instance": settings.instance_id, "database": "unavailable",
-                     "detail": type(exc).__name__},
+                     "cache": cache_state, "detail": type(exc).__name__},
         )
-    return {"status": "ok", "instance": settings.instance_id, "database": "ok"}
+    return {"status": "ok", "instance": settings.instance_id, "database": "ok", "cache": cache_state}
+
+
+@app.get("/cache/stats", tags=["system"])
+async def cache_stats():
+    """ЛР4: спільні для всіх екземплярів лічильники HIT / MISS / BYPASS / інвалідацій."""
+    return await cache.stats()

@@ -21,5 +21,13 @@ class Settings(BaseSettings):
     # Задається лише на одному екземплярі під час експерименту; за замовчуванням 0 (вимкнено).
     artificial_delay_ms: int = 0
 
+    # ЛР4: розподілений кеш (Redis), спільний для всіх екземплярів.
+    redis_url: str = "redis://localhost:6379/0"
+    cache_enabled: bool = True
+    # Таймаут операцій з Redis: кеш має бути швидким, інакше він лише заважає.
+    cache_timeout_s: float = 0.3
+    # Після помилки Redis цей екземпляр не звертається до кешу N секунд (circuit breaker).
+    cache_retry_after_s: float = 5.0
+
 
 settings = Settings()

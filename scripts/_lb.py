@@ -35,6 +35,8 @@ RELOAD_CMD = os.environ.get("LB_RELOAD_CMD", "docker compose kill -s HUP lb")
 STOP_CMD = os.environ.get("STOP_CMD", "docker compose stop {name}")
 KILL_CMD = os.environ.get("KILL_CMD", "docker compose kill {name}")
 START_CMD = os.environ.get("START_CMD", "docker compose start {name}")
+# ЛР4: очистити кеш (усі ключі) перед експериментом.
+FLUSH_CMD = os.environ.get("FLUSH_CMD", "docker compose exec -T redis redis-cli FLUSHDB")
 # Перестворити екземпляр із затримкою: змінна APPn_DELAY_MS підставляється в docker-compose.yml.
 DELAY_CMD = os.environ.get("DELAY_CMD", "docker compose up -d --no-deps {name}")
 
@@ -59,6 +61,10 @@ def kill(name: str) -> None:
 
 def start(name: str) -> None:
     run(START_CMD.format(name=name))
+
+
+def flush_cache() -> None:
+    run(FLUSH_CMD)
 
 
 def set_delay(name: str, delay_ms: int) -> None:
@@ -152,6 +158,7 @@ class Sample:
     status: int       # HTTP-код; 0 = мережева помилка (клієнт не отримав відповіді)
     instance: str
     latency: float    # секунди
+    cache: str = ""   # ЛР4: значення X-Cache (HIT / MISS / BYPASS)
 
 
 @dataclass
@@ -190,16 +197,24 @@ class LoadResult:
         return ", ".join(f"{k}: {v} ({v * 100 / total:.0f}%)" for k, v in sorted(dist.items()))
 
 
-def one_request(url: str, timeout: float = 15) -> tuple[int, str]:
-    req = urllib.request.Request(url, headers={"Connection": "close"})
+def request_full(url: str, method: str = "GET", body: bytes | None = None,
+                 timeout: float = 15) -> tuple[int, dict, bytes]:
+    """(статус, заголовки в нижньому регістрі, тіло). Статус 0 = мережева помилка."""
+    req = urllib.request.Request(url, data=body, method=method,
+                                 headers={"Connection": "close", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resp.read()
-            return resp.status, resp.headers.get("X-Instance-ID", "?")
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
     except urllib.error.HTTPError as e:
-        return e.code, e.headers.get("X-Instance-ID", "?") if e.headers else "?"
+        hdrs = {k.lower(): v for k, v in e.headers.items()} if e.headers else {}
+        return e.code, hdrs, e.read()
     except (urllib.error.URLError, OSError):
-        return 0, "-"
+        return 0, {}, b""
+
+
+def one_request(url: str, timeout: float = 15) -> tuple[int, str]:
+    status, hdrs, _ = request_full(url, timeout=timeout)
+    return status, hdrs.get("x-instance-id", "-" if status == 0 else "?")
 
 
 def run_load(path: str = DEFAULT_PATH, concurrency: int = 20, duration: float = 15,
@@ -214,10 +229,12 @@ def run_load(path: str = DEFAULT_PATH, concurrency: int = 20, duration: float = 
     def worker() -> None:
         while time.perf_counter() < deadline:
             start_t = time.perf_counter()
-            status, inst = one_request(url)
+            status, hdrs, _ = request_full(url)
             end_t = time.perf_counter()
+            inst = hdrs.get("x-instance-id", "-" if status == 0 else "?")
             with lock:
-                result.samples.append(Sample(start_t - t0, status, inst, end_t - start_t))
+                result.samples.append(Sample(start_t - t0, status, inst, end_t - start_t,
+                                             hdrs.get("x-cache", "")))
 
     ticker = None
     if on_tick:
