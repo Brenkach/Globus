@@ -23,6 +23,7 @@ x-app: &app
   restart: unless-stopped
 
 x-db-url: &db-url postgresql+asyncpg://globus:globus@db:5432/globus
+x-redis-url: &redis-url redis://redis:6379/0
 
 services:
   db:
@@ -40,6 +41,24 @@ services:
       test: ["CMD-SHELL", "pg_isready -U globus -d globus"]
       interval: 5s
       timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ЛР4: розподілений кеш, спільний для всіх екземплярів.
+  # Це саме кеш, а не сховище: дані на диск не пишуться (--save "" --appendonly no),
+  # при перезапуску кеш порожній і наповнюється заново з БД.
+  # maxmemory + allkeys-lru: при заповненні пам'яті витісняються ключі, які найдовше не читали.
+  # Екземпляри НЕ залежать від Redis (немає depends_on): без кешу вони працюють напряму з БД.
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru",
+              "--save", "", "--appendonly", "no"]
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 10
     restart: unless-stopped
 
@@ -62,6 +81,7 @@ services:
     environment:
       DATABASE_URL: *db-url
       INSTANCE_ID: app-1
+      REDIS_URL: *redis-url
       ARTIFICIAL_DELAY_MS: ${APP1_DELAY_MS:-0}
 
   app2:
@@ -69,6 +89,7 @@ services:
     environment:
       DATABASE_URL: *db-url
       INSTANCE_ID: app-2
+      REDIS_URL: *redis-url
       ARTIFICIAL_DELAY_MS: ${APP2_DELAY_MS:-0}
 
   app3:
@@ -76,6 +97,7 @@ services:
     environment:
       DATABASE_URL: *db-url
       INSTANCE_ID: app-3
+      REDIS_URL: *redis-url
       ARTIFICIAL_DELAY_MS: ${APP3_DELAY_MS:-0}
 
   # Єдина точка входу: http://localhost:8000. Статистика балансувальника: http://localhost:8404

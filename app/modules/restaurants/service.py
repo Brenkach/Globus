@@ -1,13 +1,18 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import cache
 from app.core.exceptions import NotFoundError
 from app.core.geo import geo_point, geo_point_value
+from app.modules.restaurants import cache as keys
 from app.modules.restaurants.models import MenuItem, Restaurant
 from app.modules.restaurants.schemas import (
     MenuItemCreate,
+    MenuItemRead,
     MenuItemUpdate,
     RestaurantCreate,
+    RestaurantListItem,
+    RestaurantRead,
     RestaurantUpdate,
 )
 
@@ -16,6 +21,8 @@ async def create_restaurant(session: AsyncSession, data: RestaurantCreate) -> Re
     restaurant = Restaurant(**data.model_dump())
     session.add(restaurant)
     await session.commit()
+    # Новий ресторан може з'явитися в будь-якому результаті геопошуку.
+    await cache.bump_generation(keys.NEARBY_GENERATION)
     return restaurant
 
 
@@ -54,6 +61,10 @@ async def update_restaurant(
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(restaurant, field, value)
     await session.commit()
+    # Інвалідація ПІСЛЯ коміту: якщо скинути раніше, паралельний запит міг би
+    # встигнути закешувати старі дані з БД до завершення транзакції.
+    await cache.invalidate(keys.restaurant_key(restaurant_id))
+    await cache.bump_generation(keys.NEARBY_GENERATION)
     return restaurant
 
 
@@ -64,6 +75,7 @@ async def add_menu_item(
     item = MenuItem(restaurant_id=restaurant_id, **data.model_dump())
     session.add(item)
     await session.commit()
+    await cache.invalidate(*keys.menu_keys(restaurant_id))
     return item
 
 
@@ -84,6 +96,7 @@ async def update_menu_item(session: AsyncSession, item_id: int, data: MenuItemUp
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(item, field, value)
     await session.commit()
+    await cache.invalidate(*keys.menu_keys(item.restaurant_id))
     return item
 
 
@@ -97,3 +110,45 @@ async def get_items_for_order(
         MenuItem.restaurant_id == restaurant_id, MenuItem.id.in_(item_ids)
     )
     return {item.id: item for item in (await session.scalars(stmt)).all()}
+
+
+# --- ЛР4: кешовані версії read-intensive сценаріїв (Cache-Aside) ---
+# Повертають (дані у вигляді JSON-сумісних dict, статус кешу HIT / MISS / BYPASS).
+
+async def get_restaurant_cached(session: AsyncSession, restaurant_id: int) -> tuple[dict, str]:
+    async def load() -> dict:
+        r = await get_restaurant(session, restaurant_id)
+        return RestaurantRead.model_validate(r).model_dump(mode="json")
+
+    return await cache.cache_aside(keys.restaurant_key(restaurant_id), keys.TTL_RESTAURANT, load)
+
+
+async def get_menu_cached(
+    session: AsyncSession, restaurant_id: int, only_available: bool
+) -> tuple[list[dict], str]:
+    async def load() -> list[dict]:
+        items = await get_menu(session, restaurant_id, only_available)
+        return [MenuItemRead.model_validate(i).model_dump(mode="json") for i in items]
+
+    return await cache.cache_aside(keys.menu_key(restaurant_id, only_available), keys.TTL_MENU, load)
+
+
+async def find_nearby_cached(
+    session: AsyncSession, lat: float, lng: float, radius_m: float, limit: int
+) -> tuple[list[dict], str]:
+    # Відстань рахується від округленої точки, тому відповідь однакова для всього «квадрата» ~110 м.
+    lat, lng = keys.normalize_point(lat, lng)
+
+    async def load() -> list[dict]:
+        found = await find_nearby(session, lat, lng, radius_m, limit)
+        return [
+            RestaurantListItem.model_validate(r)
+            .model_copy(update={"distance_m": round(d, 1)})
+            .model_dump(mode="json")
+            for r, d in found
+        ]
+
+    gen = await cache.generation(keys.NEARBY_GENERATION)
+    if gen is None:   # Redis недоступний: напряму з БД
+        return await load(), cache.BYPASS
+    return await cache.cache_aside(keys.nearby_key(gen, lat, lng, radius_m, limit), keys.TTL_NEARBY, load)

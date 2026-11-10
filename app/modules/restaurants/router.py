@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.core.database import SessionDep
 from app.core.exceptions import AppError
@@ -25,6 +25,7 @@ async def create_restaurant(data: RestaurantCreate, session: SessionDep):
 @router.get("", response_model=list[RestaurantListItem])
 async def list_restaurants(
     session: SessionDep,
+    response: Response,
     lat: float | None = Query(default=None, ge=-90, le=90),
     lng: float | None = Query(default=None, ge=-180, le=180),
     radius_m: float = Query(default=5000, gt=0, le=50_000),
@@ -35,17 +36,18 @@ async def list_restaurants(
     if (lat is None) != (lng is None):
         raise AppError("Both lat and lng must be provided for geo search")
     if lat is not None and lng is not None:
-        nearby = await service.find_nearby(session, lat, lng, radius_m, limit)
-        return [
-            RestaurantListItem.model_validate(r).model_copy(update={"distance_m": round(d, 1)})
-            for r, d in nearby
-        ]
+        data, cache_status = await service.find_nearby_cached(session, lat, lng, radius_m, limit)
+        response.headers["X-Cache"] = cache_status
+        return data
+    # Звичайний список (адмінський, з пагінацією) не кешується: читається рідко.
     return await service.list_restaurants(session, limit, offset)
 
 
 @router.get("/{restaurant_id}", response_model=RestaurantRead)
-async def get_restaurant(restaurant_id: int, session: SessionDep):
-    return await service.get_restaurant(session, restaurant_id)
+async def get_restaurant(restaurant_id: int, session: SessionDep, response: Response):
+    data, cache_status = await service.get_restaurant_cached(session, restaurant_id)
+    response.headers["X-Cache"] = cache_status
+    return data
 
 
 @router.patch("/{restaurant_id}", response_model=RestaurantRead)
@@ -61,8 +63,11 @@ async def add_menu_item(restaurant_id: int, data: MenuItemCreate, session: Sessi
 
 
 @router.get("/{restaurant_id}/menu", response_model=list[MenuItemRead])
-async def get_menu(restaurant_id: int, session: SessionDep, only_available: bool = True):
-    return await service.get_menu(session, restaurant_id, only_available)
+async def get_menu(restaurant_id: int, session: SessionDep, response: Response, only_available: bool = True):
+    """Меню ресторану. Кешується (Cache-Aside); джерело відповіді в заголовку X-Cache."""
+    data, cache_status = await service.get_menu_cached(session, restaurant_id, only_available)
+    response.headers["X-Cache"] = cache_status
+    return data
 
 
 @menu_router.patch("/{item_id}", response_model=MenuItemRead)
