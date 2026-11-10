@@ -1,0 +1,19 @@
+# НЕ для продакшену. Відкриває прямий доступ до екземплярів і БД з хоста:
+# потрібно для тестів cross-instance з ЛР2 (scripts/test_cross_instance.ps1) і для налагодження.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.direct.yml up -d
+#
+# В основній конфігурації цих портів немає: клієнт бачить лише балансувальник (ЛР3, інкапсуляція).
+services:
+  app1:
+    ports:
+      - "8001:8000"
+  app2:
+    ports:
+      - "8002:8000"
+  app3:
+    ports:
+      - "8003:8000"
+  db:
+    ports:
+      - "5434:5432"
